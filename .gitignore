@@ -1,0 +1,10 @@
+# build output
+/dist/
+*.pdb
+
+# stray builds / temp
+/ZapretVN.exe
+src/*.exe
+*.tmp
+Thumbs.db
+desktop.ini

@@ -1,0 +1,26 @@
+# Домены, к которым применяется обход DPI (поддомены включаются автоматически).
+# Можно дописывать свои — по одному на строку. После правки перезапусти zapret.
+
+# --- Steam ---
+steampowered.com
+steamcommunity.com
+steamstatic.com
+steam-chat.com
+steamgames.com
+steamusercontent.com
+steamserver.net
+s.team
+valvesoftware.com
+
+# --- Roblox ---
+roblox.com
+rbxcdn.com
+rbx.com
+robloxlabs.com
+
+# --- Telegram (в VN блокируют с 2025, на части провайдеров) ---
+telegram.org
+telegram.me
+t.me
+telesco.pe
+tdesktop.com
