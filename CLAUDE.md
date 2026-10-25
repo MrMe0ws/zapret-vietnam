@@ -116,8 +116,21 @@ the service to be **stopped** — always `Stop() → Configure() → Start()`.
   `*.fastly.steamstatic.com`, steam-chat, nyaa.si, 1337x.to, bet365, pornhub… are blocked.
 - `multisplit`/`multidisorder` at `1,midsld` defeat it; `fake` with `badseq` alone and `hostfakesplit` don't.
 - Roblox client APIs (`apis/gamejoin/auth/realtime-signalr.roblox.com`) work with the bypass.
-  `www.roblox.com` HTML pages (`/`, `/home`, `/login`) hang even with a valid TLS session and genuine
-  certificate while `/robots.txt` works — server-side behaviour, **not fixable by DPI bypass**.
+  `www.roblox.com` HTML pages (`/`, `/home`, `/login`, `/users/<id>/profile`) hang even with a valid TLS
+  session and genuine certificate while `/robots.txt`, `/discover` and the APIs work. This is a
+  **Roblox-side geoblock of Vietnamese IPs** (Roblox operates in VN via VNG since 2026-07): check-host.net
+  loaded the page from ~40 countries and failed only from the Vietnam node; the same profile page loads
+  instantly through a UK VPN exit. Not fixable by DPI bypass — needs a non-VN IP (VPN/proxy).
+- A full-tunnel VPN (Wintun TUN, e.g. "incy") coexists with the running service — verified working
+  with both on. Side effect seen: while the VPN was broken/connecting, every connection failed and
+  autohostlist filled up with Steam download CDN hosts; `steamcontent.com` / `steampipe.akamaized.net`
+  are now in the default exclude list for that reason.
+- **Telegram is IP-blocked** on FPT (seen 2026-10-26): the whole `149.154.167.0/24` (DC2 `.51`, DC4 `.91`,
+  web.telegram.org `.99`) gets no SYN-ACK on any port, on PC and phone alike. DC1 `149.154.175.53`,
+  DC3 `149.154.175.100`, DC5 `91.108.56.130` are reachable. Not fixable by DPI bypass — needs an
+  MTProxy/SOCKS5 proxy in Telegram or a VPN. The Check tab probes DCs by TCP (`Checks.TelegramDcs`)
+  and reports "заблокирован по IP". Telegram's HTTP transport sends `Host: <IP>`, so winws used to
+  put bare IPs into autohostlist; the app now strips them (`ListEditor.StripIps`).
 - curl (Schannel) and Chromium ClientHellos differ; verify strategies with a real Chromium
   (Steam's CEF) when possible, e.g. headless Edge `--dump-dom` run as a **non-admin** process
   (Edge refuses to run elevated).

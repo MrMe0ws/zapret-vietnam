@@ -9,3 +9,7 @@ mbbank.com.vn
 momo.vn
 zalopay.vn
 gov.vn
+# Серверы загрузок Steam — не заблокированы; без исключения авто-список
+# засоряется ими, когда сеть недоступна (например, при сломанном VPN)
+steamcontent.com
+steampipe.akamaized.net

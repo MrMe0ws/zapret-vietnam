@@ -24,8 +24,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyTitle("Zapret VN")]
 [assembly: System.Reflection.AssemblyProduct("Zapret VN")]
 [assembly: System.Reflection.AssemblyDescription("Обход DPI-блокировок (zapret / winws)")]
-[assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.0.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.1.0.0")]
 [assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8")]
 
 namespace ZapretVN
@@ -33,7 +33,7 @@ namespace ZapretVN
     static class App
     {
         public const string Name = "Zapret VN";
-        public const string Version = "1.0.0";
+        public const string Version = "1.1.0";
         public const string Root = @"C:\zapret-vietnam";
         public const string ServiceName = "zapret-vn";
         public const string TaskName = "ZapretVN";
@@ -93,6 +93,8 @@ mbbank.com.vn
 momo.vn
 zalopay.vn
 gov.vn
+steamcontent.com
+steampipe.akamaized.net
 ";
     }
 
@@ -145,11 +147,22 @@ gov.vn
             new[] { "Discord", "discord.com" },
         };
 
-        // для автоподбора стратегии
+        // серверы Telegram (DC1..DC5): приложение ходит на них по IP, без домена.
+        // Провайдер может закрыть их по IP — тогда обход DPI бессилен, нужен прокси/VPN.
+        public static readonly string[][] TelegramDcs =
+        {
+            new[] { "DC1", "149.154.175.53" },
+            new[] { "DC2", "149.154.167.51" },
+            new[] { "DC3", "149.154.175.100" },
+            new[] { "DC4", "149.154.167.91" },
+            new[] { "DC5", "91.108.56.130" },
+        };
+
+        // для автоподбора стратегии (web.telegram.org не берём: его блокируют по IP, ни одна стратегия не поможет)
         public static readonly string[] PickHosts =
         {
             "store.steampowered.com", "steamcommunity.com", "help.steampowered.com", "checkout.steampowered.com",
-            "store.fastly.steamstatic.com", "steam-chat.com", "apis.roblox.com", "gamejoin.roblox.com", "web.telegram.org",
+            "store.fastly.steamstatic.com", "steam-chat.com", "apis.roblox.com", "gamejoin.roblox.com",
         };
 
         // поиск блокировок: категория | хост для проверки | домен для списка
@@ -633,6 +646,54 @@ gov.vn
             return pos;
         }
 
+        // устанавливается ли TCP-соединение вообще (без него обход DPI ничего не может — блок по IP)
+        public static bool TcpOpen(string ip, int port, int timeoutMs)
+        {
+            try
+            {
+                using (var c = new TcpClient(AddressFamily.InterNetwork))
+                {
+                    var ar = c.BeginConnect(ip, port, null, null);
+                    if (!ar.AsyncWaitHandle.WaitOne(timeoutMs)) return false;
+                    c.EndConnect(ar);
+                    return c.Connected;
+                }
+            }
+            catch { return false; }
+        }
+
+        // TCP-проверка нескольких IP; неудачные пробуем второй раз, чтобы не ошибиться из-за потери пакета
+        public static Dictionary<string, bool> TcpMany(IEnumerable<string> ips, int port, int timeoutMs)
+        {
+            var r = new ConcurrentDictionary<string, bool>();
+            var all = ips.Distinct().ToList();
+            Parallel.ForEach(all, new ParallelOptions { MaxDegreeOfParallelism = 16 }, ip => { r[ip] = TcpOpen(ip, port, timeoutMs); });
+            Parallel.ForEach(all.Where(ip => !r[ip]).ToList(), new ParallelOptions { MaxDegreeOfParallelism = 16 }, ip => { r[ip] = TcpOpen(ip, port, timeoutMs); });
+            return r.ToDictionary(kv => kv.Key, kv => kv.Value);
+        }
+
+        // адрес хоста через системный DNS (null = не найден)
+        public static string SystemResolve(string host)
+        {
+            try
+            {
+                var a = Dns.GetHostAddresses(host).FirstOrDefault(x => x.AddressFamily == AddressFamily.InterNetwork);
+                return a == null ? null : a.ToString();
+            }
+            catch { return null; }
+        }
+
+        public static bool IsIp(string s)
+        {
+            IPAddress a;
+            return s != null && IPAddress.TryParse(s.Trim(), out a);
+        }
+
+        // curl не смог даже подключиться (а не сброс TLS по DPI)
+        public static bool NoConnect(int code) { return code == 7 || code == 28 || code == -1; }
+
+        public const string IpBlockText = "заблокирован по IP — нужен прокси/VPN";
+
         public static bool IsBogus(string ip)
         {
             return ip.StartsWith("127.") || ip == "0.0.0.0" || ip.StartsWith("10.") || ip.StartsWith("192.168.")
@@ -875,6 +936,24 @@ gov.vn
             return r;
         }
 
+        // winws кладёт в авто-список и голые IP (HTTP-запросы вида Host: 149.154.167.50 — так ходит Telegram).
+        // Их блокируют по IP, обход по списку им не помогает — убираем. Возвращает убранные адреса.
+        public static List<string> StripIps(string path)
+        {
+            var removed = new List<string>();
+            try
+            {
+                if (!File.Exists(path)) return removed;
+                var lines = File.ReadAllLines(path);
+                var keep = new List<string>();
+                foreach (var l in lines)
+                    if (NetTest.IsIp(l)) removed.Add(l.Trim()); else keep.Add(l);
+                if (removed.Count > 0) File.WriteAllLines(path, keep, new UTF8Encoding(false));
+            }
+            catch { }
+            return removed;
+        }
+
         public void Reload()
         {
             header.Clear();
@@ -1089,11 +1168,12 @@ gov.vn
             scan.Text = "Поиск блокировок";
 
             // проверка
-            pageCheck = Page("Проверяет, открываются ли сайты прямо сейчас — так же, как их видят Steam, Roblox и браузер на этом компьютере.");
+            pageCheck = Page("Проверяет, открываются ли сайты прямо сейчас — так же, как их видят Steam, Roblox и браузер на этом компьютере, — и доступны ли серверы Telegram. " +
+                "«Заблокирован по IP» значит, что провайдер не пускает к серверу совсем: обход DPI тут не поможет, нужен прокси или VPN.");
             btnCheck = new Button { Text = "Проверить сейчас", AutoSize = true, Margin = new Padding(0, 0, 8, 6) };
             btnCheck.Click += (s, e) => RunCheck();
             ((FlowLayoutPanel)pageCheck.Tag).Controls.Add(btnCheck);
-            lvCheck = MakeList(false, "Что", 220, "Адрес", 240, "Результат", 260);
+            lvCheck = MakeList(false, "Что", 200, "Адрес", 230, "Результат", 330);
             ((TableLayoutPanel)pageCheck.Controls[0]).Controls.Add(lvCheck, 0, 2);
             tabs.TabPages.Add(pageCheck);
             pageCheck.Text = "Проверка";
@@ -1200,6 +1280,7 @@ gov.vn
             cbStrategy.SelectedItem = Strategies.Get(Settings.Get("strategy", "multidisorder"));
             chkAuto.Checked = AutoStartSetting();
             loadingUi = false;
+            var strayIps = screenshotMode ? new List<string>() : ListEditor.StripIps(App.ListAuto);
             edMain.Reload(); edAuto.Reload(); edExcl.Reload();
             autoMtime = Mtime(App.ListAuto);
 
@@ -1222,6 +1303,7 @@ gov.vn
             tray.Visible = true;
             timer.Start();
             Log("Zapret VN " + App.Version + " запущен");
+            LogStrayIps(strayIps);
 
             showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\ZapretVN_Show");
             var th = new Thread(() => { while (true) { showEvent.WaitOne(); try { BeginInvoke((Action)ShowMain); } catch { } } });
@@ -1260,6 +1342,12 @@ gov.vn
         {
             if (Settings.Has("autostart")) return Settings.Get("autostart", "1") == "1";
             return !Zapret.ServiceExists() || Zapret.ServiceAutoStart();
+        }
+
+        void LogStrayIps(List<string> ips)
+        {
+            if (ips.Count > 0)
+                Log("Из авто-списка убраны IP-адреса (" + string.Join(", ", ips) + "): их блокируют по IP, обход не поможет. Если это Telegram — нужен прокси в Telegram или VPN, см. «Проверка».");
         }
 
         static DateTime Mtime(string f) { try { return File.GetLastWriteTimeUtc(f); } catch { return DateTime.MinValue; } }
@@ -1322,7 +1410,8 @@ gov.vn
             var mt = Mtime(App.ListAuto);
             if (mt != autoMtime)
             {
-                autoMtime = mt;
+                LogStrayIps(ListEditor.StripIps(App.ListAuto));
+                autoMtime = Mtime(App.ListAuto);
                 var before = edAuto.Items;
                 edAuto.Reload();
                 var added = edAuto.Items.Except(before).ToList();
@@ -1485,7 +1574,7 @@ gov.vn
         {
             if (busy) return;
             if (MessageBox.Show(this,
-                    "Программа по очереди попробует все стратегии и выберет ту, при которой открывается больше всего сайтов (Steam, Roblox, Telegram).\n\n" +
+                    "Программа по очереди попробует все стратегии и выберет ту, при которой открывается больше всего сайтов (Steam, Roblox).\n\n" +
                     "Это займёт 1–3 минуты, обход на это время будет выключен. Начать?",
                     App.Name, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             Strategy best = null;
@@ -1538,10 +1627,24 @@ gov.vn
             var rows = Checks.Sites.Select(x => new[] { x[0], x[1] }).ToList();
             foreach (var d in edAuto.Items.Take(8)) rows.Add(new[] { "Найдено автоматически", d });
             Dictionary<string, List<int>> res = null;
+            var why = new Dictionary<string, string>(); // хост -> причина, если не открылся без соединения
+            Dictionary<string, bool> dc = null;
             tabs.SelectedTab = pageCheck;
             RunOp("Проверяю сайты...", () =>
             {
+                var tcp = Task.Run(() => NetTest.TcpMany(Checks.TelegramDcs.Select(d => d[1]), 443, 4000));
                 res = NetTest.Curl(rows.Select(r => r[1]).ToList(), null, 1, 8);
+                // не подключились — смотрим, есть ли вообще TCP до сервера (иначе это блок по IP, а не DPI)
+                var failed = res.Where(kv => NetTest.NoConnect(kv.Value[0])).Select(kv => kv.Key).ToList();
+                var ips = failed.ToDictionary(h => h, h => NetTest.SystemResolve(h));
+                var open = NetTest.TcpMany(ips.Values.Where(ip => ip != null && !NetTest.IsBogus(ip)), 443, 4000);
+                foreach (var kv in ips)
+                {
+                    if (kv.Value == null) continue;
+                    if (NetTest.IsBogus(kv.Value)) why[kv.Key] = "адрес подменён (" + kv.Value + ") — включи защищённый DNS";
+                    else if (!open[kv.Value]) why[kv.Key] = NetTest.IpBlockText;
+                }
+                dc = tcp.Result;
             }, () =>
             {
                 lvCheck.BeginUpdate();
@@ -1551,12 +1654,36 @@ gov.vn
                 {
                     int code = res[r[1]][0];
                     if (code == 0) ok++;
-                    var it = new ListViewItem(new[] { r[0], r[1], (code == 0 ? "✔ " : "✖ ") + NetTest.Describe(code) });
+                    string text;
+                    if (!why.TryGetValue(r[1], out text)) text = NetTest.Describe(code);
+                    var it = new ListViewItem(new[] { r[0], r[1], (code == 0 ? "✔ " : "✖ ") + text });
                     it.ForeColor = code == 0 ? Color.FromArgb(24, 128, 68) : Color.FromArgb(190, 40, 40);
                     lvCheck.Items.Add(it);
                 }
+                var dcBlocked = new List<string>();
+                foreach (var d in Checks.TelegramDcs)
+                {
+                    bool up = dc[d[1]];
+                    if (!up) dcBlocked.Add(d[0]);
+                    var it = new ListViewItem(new[] { "Telegram — сервер " + d[0], d[1], up ? "✔ доступен" : "✖ " + NetTest.IpBlockText });
+                    it.ForeColor = up ? Color.FromArgb(24, 128, 68) : Color.FromArgb(190, 40, 40);
+                    lvCheck.Items.Add(it);
+                }
                 lvCheck.EndUpdate();
-                Log("Проверка: открывается " + ok + " из " + rows.Count);
+                Log("Проверка: открывается " + ok + " из " + rows.Count + ", серверов Telegram доступно " + (Checks.TelegramDcs.Length - dcBlocked.Count) + " из " + Checks.TelegramDcs.Length);
+                var ipBlocked = rows.Where(r => why.ContainsKey(r[1]) && why[r[1]] == NetTest.IpBlockText).Select(r => r[1]).ToList();
+                if (ipBlocked.Count > 0) Log("Заблокированы по IP (обход DPI не поможет): " + string.Join(", ", ipBlocked));
+                if (dcBlocked.Count > 0)
+                {
+                    string msg = "Провайдер заблокировал серверы Telegram по IP-адресу: " + string.Join(", ", dcBlocked) + ".\n\n" +
+                        "Если ваш аккаунт на одном из них (у аккаунтов из России и Европы это обычно DC2 или DC4), Telegram не подключится — " +
+                        "ни на компьютере, ни на телефоне в этой сети. Обход DPI тут бессилен: до сервера не доходит даже первый пакет.\n\n" +
+                        "Что поможет:\n" +
+                        "• прокси в самом Telegram: Настройки → Данные и память → Прокси (MTProxy или SOCKS5 за пределами Вьетнама);\n" +
+                        "• или VPN — его можно держать включённым вместе с Zapret VN.";
+                    Log("Telegram: " + string.Join(", ", dcBlocked) + " заблокированы по IP — нужен прокси в Telegram или VPN");
+                    if (Visible) MessageBox.Show(this, msg, App.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
             });
         }
 
@@ -1595,6 +1722,10 @@ gov.vn
             var ips = NetTest.DohMany(list.Select(r => r.Host));
             SetBusyText("Пробую открыть сайты напрямую...");
             var curl = NetTest.Curl(list.Select(r => r.Host).ToList(), ips, 2, 7);
+            // не подключились ни разу — есть ли вообще TCP до настоящего адреса?
+            SetBusyText("Проверяю блокировки по IP...");
+            var noConn = list.Where(r => ips.ContainsKey(r.Host) && ips[r.Host] != null && curl[r.Host].All(NetTest.NoConnect)).Select(r => ips[r.Host]);
+            var tcp = NetTest.TcpMany(noConn, 443, 4000);
             foreach (var r in list)
             {
                 r.InList = covered.Any(d => r.Host == d || r.Host.EndsWith("." + d)) && !excluded.Any(d => r.Host == d || r.Host.EndsWith("." + d));
@@ -1608,7 +1739,11 @@ gov.vn
                 r.Isp = gw == null ? "—" : ispIp == null ? "нет ответа" : ispIp == "" ? "пустой ответ" : dnsBlock ? ispIp + " (подмена)" : "нормальный";
                 if (ip == null) { r.NotFound = true; r.Https = "—"; r.Verdict = "сайт не найден"; continue; }
                 r.Https = ok ? (r.InList ? "открывается (через обход)" : "открывается") : NetTest.Describe(codes.First(c => c != 0));
-                if (r.InList) r.Verdict = "уже в обходе";
+                bool tcpOpen;
+                bool ipBlock = !ok && tcp.TryGetValue(ip, out tcpOpen) && !tcpOpen;
+                // блок по IP: в список добавлять бесполезно — нужен прокси/VPN
+                if (ipBlock) { r.Maybe = true; r.Https = "нет TCP-соединения"; r.Verdict = "блок по IP (нужен VPN)"; }
+                else if (r.InList) r.Verdict = "уже в обходе";
                 else if (dnsBlock || reset)
                 {
                     r.Blocked = true;
@@ -1686,6 +1821,7 @@ gov.vn
             Directory.CreateDirectory(dir);
             lvCheck.Items.Add(new ListViewItem(new[] { "Steam — магазин", "store.steampowered.com", "✔ открывается" }) { ForeColor = Color.FromArgb(24, 128, 68) });
             lvCheck.Items.Add(new ListViewItem(new[] { "Roblox — API", "apis.roblox.com", "✖ сброс при подключении (DPI)" }) { ForeColor = Color.FromArgb(190, 40, 40) });
+            lvCheck.Items.Add(new ListViewItem(new[] { "Telegram — сервер DC2", "149.154.167.51", "✖ " + NetTest.IpBlockText }) { ForeColor = Color.FromArgb(190, 40, 40) });
             lvScan.Items.Add(new ListViewItem(new[] { "nyaa.si", "Торренты", "127.0.0.1 (подмена)", "сброс при подключении (DPI)", "заблокирован (DNS + DPI)" }) { Checked = true, ForeColor = Color.FromArgb(190, 40, 40) });
             lvScan.Items.Add(new ListViewItem(new[] { "steampowered.com", "Steam", "127.0.0.1 (подмена)", "открывается (через обход)", "уже в обходе" }) { ForeColor = Color.FromArgb(24, 128, 68) });
             for (int i = 0; i < tabs.TabCount; i++)
